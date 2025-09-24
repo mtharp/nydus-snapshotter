@@ -406,19 +406,28 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) ([]mount.Mount, er
 	case snapshots.KindActive:
 		if info.Parent != "" {
 			pKey := info.Parent
-			if pID, pInfo, _, err := snapshot.GetSnapshotInfo(ctx, o.ms, pKey); err == nil {
-				if label.IsNydusMetaLayer(pInfo.Labels) {
-					if err = o.fs.WaitUntilReady(pID); err != nil {
-						return nil, errors.Wrapf(err, "mounts: snapshot %s is not ready, err: %v", pID, err)
-					}
-					needRemoteMounts = true
-					metaSnapshotID = pID
-				} else if (o.fs.TarfsEnabled() && label.IsTarfsDataLayer(pInfo.Labels)) || label.IsNydusProxyMode(pInfo.Labels) {
-					needRemoteMounts = true
-					metaSnapshotID = pID
-				}
-			} else {
+			pID, pInfo, _, err := snapshot.GetSnapshotInfo(ctx, o.ms, pKey)
+			if err != nil {
 				return nil, errors.Wrapf(err, "get parent snapshot info, parent key=%q", pKey)
+			}
+			if strings.HasSuffix(pInfo.Name, "-init") && pInfo.Parent != "" {
+				// Docker commits an additional "init layer"; skip past it.
+				// https://github.com/moby/moby/blob/v28.4.0/layer/layer_store.go#L645
+				pKey = pInfo.Parent
+				pID, pInfo, _, err = snapshot.GetSnapshotInfo(ctx, o.ms, pKey)
+				if err != nil {
+					return nil, errors.Wrapf(err, "get parent snapshot info, parent key=%q", pKey)
+				}
+			}
+			if label.IsNydusMetaLayer(pInfo.Labels) {
+				if err = o.fs.WaitUntilReady(pID); err != nil {
+					return nil, errors.Wrapf(err, "mounts: snapshot %s is not ready, err: %v", pID, err)
+				}
+				needRemoteMounts = true
+				metaSnapshotID = pID
+			} else if (o.fs.TarfsEnabled() && label.IsTarfsDataLayer(pInfo.Labels)) || label.IsNydusProxyMode(pInfo.Labels) {
+				needRemoteMounts = true
+				metaSnapshotID = pID
 			}
 		}
 	case snapshots.KindCommitted:
@@ -626,12 +635,13 @@ func (o *snapshotter) Remove(ctx context.Context, key string) error {
 	}
 
 	if info.Kind == snapshots.KindCommitted {
-		blobDigest := info.Labels[snpkg.TargetLayerDigestLabel]
-		go func() {
-			if err := o.fs.RemoveCache(blobDigest); err != nil {
-				log.L.WithError(err).Errorf("Failed to remove cache %s", blobDigest)
-			}
-		}()
+		if blobDigest := info.Labels[snpkg.TargetLayerDigestLabel]; blobDigest != "" {
+			go func() {
+				if err := o.fs.RemoveCache(blobDigest); err != nil {
+					log.L.WithError(err).Errorf("Failed to remove cache %#v", info)
+				}
+			}()
+		}
 	}
 
 	_, _, err = storage.Remove(ctx, key)
