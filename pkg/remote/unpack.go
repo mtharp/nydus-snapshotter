@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
 )
@@ -35,12 +36,22 @@ func Unpack(reader io.Reader, source, target string) error {
 			return err
 		}
 		if hdr.Name == source {
-			file, err := os.Create(target)
+			dir, base := filepath.Split(target)
+			file, err := os.CreateTemp(dir, base+".tmp")
 			if err != nil {
 				return err
 			}
-			defer file.Close()
+			defer func() {
+				_ = file.Close()
+				_ = os.Remove(file.Name())
+			}()
 			if _, err := io.Copy(file, tr); err != nil {
+				return err
+			}
+			if err := file.Close(); err != nil {
+				return err
+			}
+			if err := os.Rename(file.Name(), target); err != nil {
 				return err
 			}
 			found = true
