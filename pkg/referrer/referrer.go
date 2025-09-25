@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/nydus-snapshotter/pkg/auth"
 	"github.com/containerd/nydus-snapshotter/pkg/converter"
 	"github.com/containerd/nydus-snapshotter/pkg/label"
@@ -27,6 +28,11 @@ import (
 // Containerd restricts the max size of manifest index to 8M, follow it.
 const maxManifestIndexSize = 0x800000
 
+var (
+	errNoReferrers       = errors.New("empty referrer list")
+	errNotANydusManifest = errors.New("not a nydus manifest")
+)
+
 type referrer struct {
 	remote *remote.Remote
 }
@@ -35,6 +41,22 @@ func newReferrer(keyChain *auth.PassKeyChain, insecure bool) *referrer {
 	return &referrer{
 		remote: remote.New(keyChain, insecure),
 	}
+}
+
+func selectImage(index ocispec.Index) (ocispec.Descriptor, bool) {
+	for _, desc := range index.Manifests {
+		if desc.MediaType != ocispec.MediaTypeImageManifest &&
+			desc.MediaType != images.MediaTypeDockerSchema2Manifest {
+			// not an image manifest
+			continue
+		}
+		if desc.ArtifactType != "" && desc.ArtifactType != converter.ManifestConfigNydus {
+			// not a nydus image
+			continue
+		}
+		return desc, true
+	}
+	return ocispec.Descriptor{}, false
 }
 
 // checkReferrer fetches the referrers and parses out the nydus
@@ -64,13 +86,13 @@ func (r *referrer) checkReferrer(ctx context.Context, ref string, manifestDigest
 		if err := json.Unmarshal(bytes, &index); err != nil {
 			return nil, errors.Wrap(err, "unmarshal referrers index")
 		}
-		if len(index.Manifests) == 0 {
-			return nil, fmt.Errorf("empty referrer list")
+		desc, found := selectImage(index)
+		if !found {
+			return nil, errNoReferrers
 		}
 
 		// Prefer to fetch the last manifest and check if it is a nydus image.
-		// TODO: should we search by matching ArtifactType?
-		rc, err = fetcher.Fetch(ctx, index.Manifests[0])
+		rc, err = fetcher.Fetch(ctx, desc)
 		if err != nil {
 			return nil, errors.Wrap(err, "fetch referrers")
 		}
@@ -89,7 +111,7 @@ func (r *referrer) checkReferrer(ctx context.Context, ref string, manifestDigest
 		}
 		metaLayer := manifest.Layers[len(manifest.Layers)-1]
 		if !label.IsNydusMetaLayer(metaLayer.Annotations) {
-			return nil, fmt.Errorf("invalid nydus manifest")
+			return nil, errNotANydusManifest
 		}
 
 		return &metaLayer, nil
